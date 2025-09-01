@@ -3,7 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 from ._utils import  sliding_window_baseline_correction, detect_peaks
-from ._utils import calculate_baselines_threshold
+from ._utils import calculate_signal_threshold_from_signal
 
 def load_lif_data(mdata, input_path, filename, sn_ratio=3, interval=6):
     """
@@ -79,7 +79,7 @@ def extract_lif_peak(mdata, lif_data, interval=60, sn_ratio=3, window_size=1000)
                                                     output2figures=None, window_size=window_size, p=0.5)
     # Detect peaks in the intensity data
     mdata.logger.info(f'2) Detect peaks in the intensity data')
-    mph = calculate_baselines_threshold(df['signal'], multiplier=sn_ratio)
+    mph = calculate_signal_threshold_from_signal(df, multiplier=sn_ratio)
     peaks = detect_peaks(lif_data['intensity'], mpd=interval, mph=mph)
 
     # Check and filter the detected peaks events

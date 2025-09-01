@@ -1,11 +1,13 @@
+import re
+import warnings
 import pybaselines
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from scipy.stats import gaussian_kde
 from scipy.linalg import LinAlgError
 from typing import Union, Literal, Tuple, Any
 from .scMetData import scMetData
-from ._plotting import plt_baseline, plt_baseline_corrected
 
 def get_index(lst: list = None, item: str = ''):
     """
@@ -239,6 +241,7 @@ def sliding_window_baseline_correction(data: pd.Series,
     df:  A data frame that combines raw data, data baselines, and baseline-corrected data.
 
     """
+    from ._plotting import plt_baseline, plt_baseline_corrected
     # segment the data according to the window size.
     segments = segment_data(data, window_size)
 
@@ -479,35 +482,111 @@ def detect_peaks(x, mph=None, mpd=1, threshold=0, edge='rising',
     return ind
 
 
-def extract_mz_intensity_from_scm_events(mdata: scMetData):
+def extract_mz_intensity_from_scm_events(mdata, offset=1, ppm_threshold=10):
     """
-    Extract m/z and intensity data from single-cell metabolomics events.
+    Extract and merge m/z features from single-cell metabolomics events,
+    considering index ± offset range, keeping the maximum intensity.
 
     Parameters:
-    - scMetEvent: List or array-like structure containing indices of metabolomics events.
+    - mdata: Data structure containing .scm_events, .mz_data, and .intensity_data
+    - offset: Range of indices to consider around each event (including itself)
+    - ppm_threshold: Allowed ppm difference for merging features
     """
 
-    scm_events_index = np.array(mdata.scm_events.index)
+    def ppm_merge(mz_array, intensity_array, pos_array, ppm_threshold):
+        """Merge all m/z features of one event based on ppm difference,
+        keeping the version with the maximum intensity."""
+        if len(mz_array) == 0:
+            return [], [], []
 
-    scan_id = pd.Series(np.array(mdata.scm_events['scan_Id']))
-    cellnumber = pd.Series(np.array(mdata.scm_events['CellNumber']))
-    mz_data = [mdata.mz_data[i] for i in scm_events_index]
-    intensity_data = [mdata.intensity_data[i] for i in scm_events_index]
+        # Vectorized sorting + grouping
+        order = np.argsort(mz_array)
+        mz_sorted = mz_array[order]
+        intensity_sorted = intensity_array[order]
+        pos_sorted = pos_array[order]
 
-    scm_scan_id = scan_id.repeat([len(arr) for arr in mz_data]).reset_index(drop=True)
-    scm_cellnumber = cellnumber.repeat([len(arr) for arr in mz_data]).reset_index(drop=True)
-    scm_mz_data = pd.Series(np.concatenate(mz_data))
-    scm_intensity_data = pd.Series(np.concatenate(intensity_data))
+        groups = []
+        current_group = [0]
 
-    scm_mz_intensity = pd.DataFrame({
-        'scan_Id': scm_scan_id,
-        'mz': scm_mz_data,
-        'intensity': scm_intensity_data,
-        'CellNumber': scm_cellnumber
+        for i in range(1, len(mz_sorted)):
+            mz_ref = mz_sorted[current_group[-1]]
+            mz_curr = mz_sorted[i]
+            ppm_diff = abs(mz_curr - mz_ref) / mz_ref * 1e6
+            if ppm_diff <= ppm_threshold:
+                current_group.append(i)
+            else:
+                groups.append(current_group)
+                current_group = [i]
+        if current_group:
+            groups.append(current_group)
+
+        # For each group, keep the feature with the maximum intensity
+        merged_mz = []
+        merged_intensity = []
+        merged_pos = []
+
+        for group in groups:
+            idx = np.argmax(intensity_sorted[group])
+            real_idx = group[idx]
+            merged_mz.append(mz_sorted[real_idx])
+            merged_intensity.append(intensity_sorted[real_idx])
+            merged_pos.append(pos_sorted[real_idx])
+
+        return merged_mz, merged_intensity, merged_pos
+
+    # Extract event indices and basic information
+    scm_event_idx = np.array(mdata.scm_events.index)
+    scan_ids = np.array(mdata.scm_events['scan_Id'])
+    cell_numbers = np.array(mdata.scm_events['CellNumber'])
+
+    # Output cache
+    all_scan_ids = []
+    all_cell_numbers = []
+    all_mz = []
+    all_intensity = []
+    all_pos = []
+
+    for i, center_idx in tqdm(enumerate(scm_event_idx), total=len(scm_event_idx), desc="Processing events"):
+        # Construct valid indices within ±offset range
+        idx_range = np.arange(center_idx - offset, center_idx + offset + 1)
+        idx_range = idx_range[(idx_range >= 0) & (idx_range < len(mdata.mz_data))]
+
+        mz_list, intensity_list, pos_list = [], [], []
+
+        for idx in idx_range:
+            rel_pos = idx - center_idx
+            mz_vals = mdata.mz_data[idx]
+            intensity_vals = mdata.intensity_data[idx]
+
+            mz_list.append(mz_vals)
+            intensity_list.append(intensity_vals)
+            pos_list.append(np.full(len(mz_vals), rel_pos, dtype=int))
+
+        # Concatenate into large arrays
+        mz_array = np.concatenate(mz_list)
+        intensity_array = np.concatenate(intensity_list)
+        pos_array = np.concatenate(pos_list)
+
+        # Merge features based on ppm threshold
+        merged_mz, merged_intensity, merged_pos = ppm_merge(mz_array, intensity_array, pos_array, ppm_threshold)
+
+        n = len(merged_mz)
+        all_scan_ids.extend([scan_ids[i]] * n)
+        all_cell_numbers.extend([cell_numbers[i]] * n)
+        all_mz.extend(merged_mz)
+        all_intensity.extend(merged_intensity)
+        all_pos.extend(merged_pos)
+
+    # Construct DataFrame
+    result_df = pd.DataFrame({
+        'scan_Id': all_scan_ids,
+        'mz': all_mz,
+        'intensity': all_intensity,
+        'CellNumber': all_cell_numbers,
+        'pos': all_pos
     })
-    scm_mz_intensity = scm_mz_intensity.sort_values(by='mz', ascending=True).reset_index(drop=True)
 
-    return scm_mz_intensity
+    return result_df.sort_values(by='mz').reset_index(drop=True)
 
 
 def filter_intensity(data: pd.DataFrame, intensity_threshold: float) -> pd.DataFrame:
@@ -522,3 +601,96 @@ def filter_intensity(data: pd.DataFrame, intensity_threshold: float) -> pd.DataF
     data = data[data['intensity'] >= intensity_threshold].copy()
     data = data.sort_values(by='mz', ascending=True).reset_index(drop=True)
     return data
+
+
+
+def parse_filename(filename, marker_library=None, color_library=None):
+    # Extract base filename and annotation part (supports any file extension)
+    match = re.match(r"(?P<basename>.+?)(@\s*(?P<annotation>.+?)\s*@)?\.[^.]+$", filename)
+    if not match:
+        raise ValueError(
+            "Filename format incorrect. Expected format: "
+            "{filename}-{date}@{cell1}${mass_tag1}#{fluorophore1}&{cell2}${mass_tag2}#{fluorophore2}@.d"
+        )
+
+
+    basename = match.group("basename")
+    annotation = match.group("annotation")
+
+
+    # Load reference tables (with None check)
+    if marker_library is not None:
+        marker_df = marker_library
+    else:
+        marker_df = None
+        warnings.warn("marker_library is None. Mass tags (mz) will be unavailable.", UserWarning)
+
+
+    if color_library is not None:
+        color_df = color_library
+    else:
+        color_df = None
+        warnings.warn("color_library is None. Color codes will be unavailable.", UserWarning)
+
+
+    # Prepare output lists
+    cell_type_marker_list = []
+    cell_channel_list = []
+
+
+    if annotation:
+        entries = annotation.split("&")
+        for entry in entries:
+            # Match cell_type, optional marker_name, and optional color_name
+            cell_match = re.match(r"(?P<cell_type>[^$#]+)(\$(?P<marker_name>[^#]+))?(#(?P<color_name>.+))?", entry)
+            if cell_match:
+                cell_type = cell_match.group("cell_type")
+                marker_name = cell_match.group("marker_name") or ""
+                color_name = cell_match.group("color_name") or ""
+
+
+                # Lookup mz if marker_df is available
+                mz = None
+                if marker_name and marker_df is not None:
+                    mz_row = marker_df.loc[marker_df['marker_name'] == marker_name, 'mz']
+                    if not mz_row.empty:
+                        mz = float(mz_row.values[0])
+                    else:
+                        raise ValueError(f"Marker name '{marker_name}' not found in marker_library.")
+
+
+                # Lookup color_code by cell_type if color_df is available
+                color_code = None
+                if color_df is not None:
+                    color_row = color_df.loc[color_df['cell_type'] == cell_type, 'color_code']
+                    if not color_row.empty:
+                        color_code = color_row.values[0]
+                    else:
+                        raise ValueError(f"Cell type '{cell_type}' not found in marker_library or color_library.")
+
+
+                # Record cell_type_marker info if available
+                if marker_name and mz and color_code is not None:
+                    cell_type_marker_list.append({
+                        'cell_type': cell_type,
+                        'marker_name': marker_name,
+                        'mz': mz,
+                        'color_code': color_code
+                    })
+
+
+                # Record cell_type-channel info if color_name is present
+                if color_name:
+                    cell_channel_list.append({
+                        'cell_type': cell_type,
+                        'channel': color_name
+                    })
+
+
+    # Convert to DataFrame if data exists, else return None
+    cell_type_marker_df = pd.DataFrame(cell_type_marker_list) if cell_type_marker_list else None
+    cell_channel_df = pd.DataFrame(cell_channel_list) if cell_channel_list else None
+
+
+    return basename, cell_type_marker_df, cell_channel_df
+

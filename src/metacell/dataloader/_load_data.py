@@ -8,10 +8,10 @@ import pyopenms as oms
 from typing import Union
 from pathlib import Path
 from metacell.dataloader.scMetData import scMetData
-from ._utils import get_index, get_tic_from_mzml
+from ._utils import get_index, get_tic_from_mzml, parse_filename
 
 
-def load_rawdata(file: Union[str, Path]) -> scMetData:
+def load_rawdata(file: Union[str, Path], filename=None, marker_library=None, color_library=None) -> scMetData:
     """
     Load raw data from file.
     Include data with scan_Id, scan_start_time, TIC, mz, and intensity for all data points.
@@ -24,7 +24,7 @@ def load_rawdata(file: Union[str, Path]) -> scMetData:
     mdata: The updated object with added attributes: raw_scMet_data, mz_data, and intensity_data.
     """
     #  Retrieve the file extension and choose different file reading methods based on the specific extension.
-    mdata = scMetData(file)
+    mdata = scMetData(file,filename)
     filetype = (os.path.splitext(file)[1])[1:]
 
     mdata.logger.info("Start the scMet data processing of {}.".format(mdata.filename))
@@ -39,6 +39,10 @@ def load_rawdata(file: Union[str, Path]) -> scMetData:
 
     # 确保’TIC‘列中字符串转换为浮点数，无法转换的值将被设置为NaN
     mdata.raw_scm_data['TIC'] = pd.to_numeric(mdata.raw_scm_data['TIC'], errors='coerce')
+
+    if color_library is not None:
+        mdata.cell_type_color = color_library
+    mdata.filename, mdata.cell_type_marker_df, mdata.cell_channel_df = parse_filename(mdata.filename, marker_library, color_library)
 
     return mdata
 

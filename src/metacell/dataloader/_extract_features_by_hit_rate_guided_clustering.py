@@ -3,20 +3,19 @@ import numpy as np
 from tqdm import tqdm
 from .scMetData import scMetData
 from ._utils import extract_mz_intensity_from_scm_events, filter_intensity
-
+from ._annotate_metabolite_feature import annotate_metabolites_feature
 # 基于特征密度的聚类，利用特征密度作为聚类的核心标准。
-def extract_features_by_hit_rate_guided_clustering(mdata: scMetData, intensity_threshold: float = 500, min_hit_rate: float = 0.1, ppm_threshold: int = 10):
+def extract_features_by_hit_rate_guided_clustering(mdata: scMetData, intensity_threshold: float = 200, min_hit_rate: float = 0.1, offset: int = 1,ppm_threshold: int = 10):
     """
     Hit Rate-Guided Clustering for Metabolic Feature Extraction, HRGC.
 
     我们引入了命中率(hit rate)的概念用于描述每一个候选特征在所有细胞中出现的频率，命中率越高表明这个候选特征在更多的细胞中出现，可以作为衡量该候选特征视为代谢特征可信程度的指标之一。
-
-
     Params:
     -------
     mdata:
     intensity_threshold:
     min_hit_rate:
+    offset:
     ppm_threshold:
 
     Returns:
@@ -25,7 +24,7 @@ def extract_features_by_hit_rate_guided_clustering(mdata: scMetData, intensity_t
     """
     # Step 1: 筛选高强度的 m/z 数据
     min_hits = round(len(mdata.scm_events) * min_hit_rate)
-    data = extract_mz_intensity_from_scm_events(mdata)
+    data = extract_mz_intensity_from_scm_events(mdata, offset=offset, ppm_threshold=ppm_threshold)
 
     mdata.logger.info(f'Start metabolic features extraction by HRGC')
     mdata.logger.info(f'1) Filter out the m/z data where intensity < {intensity_threshold}.')
@@ -40,7 +39,7 @@ def extract_features_by_hit_rate_guided_clustering(mdata: scMetData, intensity_t
     cell_feature_matrix = cluster_by_hits(data, min_hits=min_hits, ppm_threshold=10)
 
     mdata.cell_feature_matrix = cell_feature_matrix
-
+    mdata.cell_feature_matrix.insert(8, 'HHI', mdata.cell_feature_matrix.pop('HHI'))
     mdata.processing_status['feature_extraction_strategy'] = 'hit rate-guided clustering'
     return mdata
 
@@ -56,39 +55,34 @@ def calculate_hits(data: pd.DataFrame, ppm_threshold: float) -> pd.DataFrame:
     """
     # 排序数据并初始化
     data = data.sort_values(by='mz').reset_index(drop=True)
-    mz_values = data['mz'].values
+    mz_values = data['mz'].values.reshape(-1, 1)
     cell_numbers = data['CellNumber'].values
     n = len(mz_values)
 
-    # 初始化结果数组
+    # 使用KDTree加速邻域查询
+    from scipy.spatial import cKDTree
+    tree = cKDTree(mz_values)
+    ppm_ranges = mz_values * ppm_threshold / 1e6
+
     hits = np.zeros(n, dtype=int)
     left_hits = np.zeros(n, dtype=int)
     right_hits = np.zeros(n, dtype=int)
 
-    # 初始化右边界索引
-    right_index = 0
-
-    # 遍历每个 m/z
-    for i in tqdm(range(n), desc="Calculating hits"):
-        mz = mz_values[i]
-        left_bound = mz - mz * ppm_threshold / 1e6
-        right_bound = mz + mz * ppm_threshold / 1e6
-
-        # 更新左边界索引
-        left_index = i
-        while left_index > 0 and mz_values[left_index - 1] >= left_bound:
-            left_index -= 1
-
-        # 更新右边界索引
-        while right_index < n and mz_values[right_index] <= right_bound:
-            right_index += 1
-
-        # 计算支持度，将当前点计入左密度中
-        left_cells = set(cell_numbers[left_index:i]) # 包含当前点
-        right_cells = set(cell_numbers[i:right_index]) # 不包含当前点
-        hits[i] = len(left_cells.union(right_cells))
-        left_hits[i] = len(left_cells)
-        right_hits[i] = len(right_cells)
+    # 查询每个点的邻域
+    for i in range(n):
+        mz = mz_values[i][0]
+        left_bound = mz - ppm_ranges[i][0]
+        right_bound = mz + ppm_ranges[i][0]
+        # 查询所有在ppm范围内的索引
+        idx = tree.query_ball_point(mz, r=ppm_ranges[i][0])
+        # 统计命中cell
+        unique_cells = set(cell_numbers[idx])
+        hits[i] = len(unique_cells)
+        # 左右密度
+        left_idx = [j for j in idx if mz_values[j][0] <= mz]
+        right_idx = [j for j in idx if mz_values[j][0] > mz]
+        left_hits[i] = len(set(cell_numbers[left_idx]))
+        right_hits[i] = len(set(cell_numbers[right_idx]))
 
     # 添加结果列到 DataFrame
     data['hits'] = hits
@@ -112,11 +106,10 @@ def cluster_by_hits(data: pd.DataFrame, min_hits: int=3, ppm_threshold: int=10):
     -------
     cell_feature_matrix: 基于特征密度聚类得到的细胞特征矩阵。
     """
-    # 初始化cluster列为-1，表示所有点未被聚类。
+    # 提前排序，减少后续重复排序
+    data = data.sort_values(by='mz').reset_index(drop=True)
     data['cluster']  = -1
 
-    # 用于存储聚类相关数据，聚类标记从 1 开始。
-    #  初始化clusters
     unique_cells = sorted(data['CellNumber'].unique())
     total_cells = len(unique_cells)
 
@@ -128,6 +121,7 @@ def cluster_by_hits(data: pd.DataFrame, min_hits: int=3, ppm_threshold: int=10):
         'mz_median',
         'hits',
         'hit_rate',
+        'HHI',
     ]+unique_cells)
 
     cluster_id = 1
@@ -135,25 +129,20 @@ def cluster_by_hits(data: pd.DataFrame, min_hits: int=3, ppm_threshold: int=10):
 
     # 筛选低密度点并标记cluster=0
     data.loc[data['hits'] <= 3, 'cluster'] = 0
-
-    # 使用tqdm显示进度
-    for hit in tqdm(range(int(max_hits), int(min_hits)-1, -1), desc="基于密度值从小到大进行聚类"):
-        # 筛选hits 等于当前密度点且暂未参与聚类的行。
+    all_hhi_values = []
+    for hit in tqdm(range(int(max_hits), int(min_hits)-1, -1), desc="Clustering by hit rate (high to low)"):
         specific_hit_rows = data[(data['hits'] == hit) & (data['cluster'] == -1)]
         if specific_hit_rows.empty:
             continue
-        # 初步连续性聚类
         sub_clusters = perform_continuity_clustering(specific_hit_rows)
-
-        # 合并相邻聚类
-        merged_clusters=merge_adjacent_clusters(sub_clusters)
-
-        # 对聚类进行预处理，包括计算聚类中心，并基于聚类中心重新划分聚类范围，最后检查并去除重复的 CellNumber，保留 mz 最近的行。
-        processed_clusters = process_clusters(data, merged_clusters, ppm_threshold=ppm_threshold)
-
-        # 更新 cell_feature_matrix，并在 data 中标记聚类状态，同时更新边缘密度。
+        merged_clusters = merge_adjacent_clusters(sub_clusters)
+        processed_clusters = process_clusters_optimized(data, merged_clusters, ppm_threshold=ppm_threshold)
         cell_feature_matrix, data, cluster_id = update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cluster_id=cluster_id, total_cells=total_cells, ppm_threshold=ppm_threshold)
-
+        for cluster in processed_clusters:
+            hhi_value = calculate_HHI(cluster, hit)
+            all_hhi_values.append(hhi_value)
+    cell_feature_matrix['HHI'] = all_hhi_values
+    cell_feature_matrix.insert(8, 'HHI', cell_feature_matrix.pop('HHI'))
     return cell_feature_matrix
 
 
@@ -209,47 +198,24 @@ def merge_adjacent_clusters(clusters):
 
     return merged_clusters
 
-# 整理出一个根据基于密度的聚类方法得到的m/z列表出来，包含有一些信息，例如hits。
-def process_clusters(data, merged_clusters, ppm_threshold=10):
-    """
-    对每个聚类执行以下操作：
-    1. 计算聚类中心 (mz 中位数)。
-    2. 基于聚类中心和 ppm 范围重新划分聚类范围。
-    3. 检查并去除重复的 CellNumber，保留 mz 最近的行。
-
-    Params:
-    -------
-    data:
-    merged_clusters: 列表，每个元素是一个DataFrame，表示一个聚类
-    ppm_threshold: mz的允许波动范围(ppm)
-
-    Returns:
-    --------
-    处理后的聚类列表。
-    """
+# 优化后的process_clusters，批量赋值避免SettingWithCopyWarning
+def process_clusters_optimized(data, merged_clusters, ppm_threshold=10):
     processed_clusters = []
-
     for cluster in merged_clusters:
-        # 1. 计算聚类中心 mz（中位数）
         mz_center = cluster['mz'].median()
-
-        # 2. 根据 10 ppm 范围重新划分聚类范围
         mz_min = mz_center * (1 - ppm_threshold / 1e6)
         mz_max = mz_center * (1 + ppm_threshold / 1e6)
-        filtered_data = data[(data['mz'] >= mz_min) & (data['mz'] <= mz_max)]
-
-        # 3. 检查并去除重复的 CellNumber
-        filtered_data['mz_center'] = mz_center
-        filtered_data['mz_diff'] = abs(filtered_data['mz'] - mz_center)  # 计算与 mz_center 的差值
-        filtered_data = (
-            filtered_data.sort_values(by=['CellNumber', 'mz_diff'])  # 按 CellNumber 和 mz_diff 排序
-            .drop_duplicates(subset='CellNumber', keep='first')      # 删除重复的 CellNumber
-            .drop(columns=['mz_diff'])                              # 删除辅助列 mz_diff
-        )
-
-        # 保存处理后的聚类
-        processed_clusters.append(filtered_data)
-
+        filtered_idx = data.index[(data['mz'] >= mz_min) & (data['mz'] <= mz_max) & ((data['cluster'] == -1))]
+        filtered_data = data.loc[filtered_idx].copy()
+        if not filtered_data.empty:
+            filtered_data.loc[:, 'mz_center'] = mz_center
+            filtered_data.loc[:, 'mz_diff'] = abs(filtered_data['mz'] - mz_center)
+            filtered_data = (
+                filtered_data.sort_values(by=['CellNumber', 'mz_diff'])
+                .drop_duplicates(subset='CellNumber', keep='first')
+                .drop(columns=['mz_diff'])
+            )
+            processed_clusters.append(filtered_data)
     return processed_clusters
 
 
@@ -400,3 +366,63 @@ def update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cl
     data = calculate_hits_for_indices(data, filtered_indices, ppm_threshold)
     return cell_feature_matrix, data, cluster_id
 
+
+
+def calculate_HHI(cluster, hit):
+    """
+    Hit Homogeneity Index (HHI)
+    Meaning: Measures the homogeneity or consistency of hits within the cluster. A value closer to 1 indicates that the hits values between samples are more consistent.
+    """
+    # Calculate the relative difference for each row (1 - hits / hit)
+    cluster['relative_diff'] = 1 - (cluster['hits'] / hit)
+
+    # Calculate the square of the relative difference
+    cluster['relative_diff_squared'] = cluster['relative_diff'] ** 2
+
+    # Calculate the mean of the squared differences and take the square root to get the standard deviation
+    std_diff = np.sqrt(cluster['relative_diff_squared'].mean())
+
+    return 1 - std_diff
+
+def remove_and_update_matrix(mdata, removed_list, metab_anno, intensity_threshold=200, min_hit_rate=0.1, offset=1, ppm_threshold=10):
+    """
+    根据 removed_list 更新 mdata.scm_events_index 和 mdata.scm_events，
+    并重新运行特征提取和代谢物注释。
+    Parameters
+    ----------
+    mdata : object
+        包含 scm_events_index (dict) 和 scm_events (DataFrame) 的对象
+    removed_list : list or array-like
+        1-based 索引列表（需要先转 0-based 再删除）
+    intensity_threshold, min_hit_rate, offset, ppm_threshold : 参数
+        用于 mc.dl.extract_features_by_hit_rate_guided_clustering
+    metab_anno : object
+        用于 mc.dl.annotate_metabolites_feature 的注释信息
+
+    Returns
+    -------
+    mdata : object
+        更新后的 mdata
+    """
+    removed_list = np.array(removed_list) - 1
+    
+    for key in mdata.scm_events_index:
+        mdata.scm_events_index[key] = np.delete(mdata.scm_events_index[key], removed_list)
+    
+    mdata.scm_events = mdata.scm_events.drop(
+        mdata.scm_events.index[removed_list]
+    ).reset_index(drop=True)
+
+    if "CellNumber" in mdata.scm_events.columns:
+        n = len(mdata.scm_events)
+        mdata.scm_events["CellNumber"] = [f"Cell{str(i).zfill(5)}" for i in range(1, n + 1)]
+
+    mdata = extract_features_by_hit_rate_guided_clustering(
+        mdata,
+        intensity_threshold=intensity_threshold,
+        min_hit_rate=min_hit_rate,
+        offset=offset,
+        ppm_threshold=ppm_threshold
+    )
+    mdata = annotate_metabolites_feature(mdata, metab_anno)
+    return mdata

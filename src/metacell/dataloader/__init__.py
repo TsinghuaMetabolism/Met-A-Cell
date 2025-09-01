@@ -17,4 +17,6 @@ from ._annotate_cell_type import annotate_cell_type_by_mz_marker
 
 from ._imputate_data import fill_nan_with_half_min
 
-from ._plotting import plt_cell_type_marker_annotation
+from ._utils import parse_filename
+
+from .scMetData import scMetData

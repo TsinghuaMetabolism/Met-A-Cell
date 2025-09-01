@@ -1,14 +1,18 @@
 import os
 import pandas as pd
+import dill
 from pathlib import Path
 from typing import Union
 from metacell.dataloader._logger import setup_logger
 
 
 class scMetData(object):
-    def __init__(self, file: Union[Path, str], ):
+    def __init__(self, file: Union[Path, str], filename=None):
         self.file = file
-        self.filename = os.path.basename(file)
+        if filename is not None:
+            self.filename = filename
+        else:
+            self.filename = os.path.basename(file)
 
         self.logger, self.memory_handler = setup_logger()
 
@@ -26,6 +30,8 @@ class scMetData(object):
         self.cell_type_marker_df = pd.DataFrame()
         self.cell_type_marker_eic = {}
         self.cell_type_marker_apex_index = {}
+
+        self.cell_channel_df = pd.DataFrame()
 
         self.scm_type = ""
         # self.lif_data_dir = {}
@@ -61,5 +67,31 @@ class scMetData(object):
             log += "No feature extraction has been performed.\n"
         return log
 
+    def save(self, path: Union[str, Path]):
+        """
+        Save the scMetData object to a file using dill.
 
+        Parameters:
+        - path: The file path to save the object (should end in .pkl or .dill)
+        """
+        with open(path, 'wb') as f:
+            dill.dump(self, f)
+        print(f"scMetData object saved to {path} using dill.")
+    
+    @staticmethod
+    def load(path: Union[str, Path]):
+        """
+        Load a scMetData object from a file using dill.
+
+        Parameters:
+        - path: The file path to load the object from
+
+        Returns:
+        - scMetData object
+        """
+        with open(path, 'rb') as f:
+            obj = dill.load(f)
+        print(f"scMetData object loaded from {path} using dill.")
+        return obj
+    
 

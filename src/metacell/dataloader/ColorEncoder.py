@@ -1,8 +1,5 @@
-
-
-
 class CellTypeMarkerEncoder(object):
-    def __init__(self, marker_df=None, default_color="#DCDCDC", combined_color="#8B658B"):
+    def __init__(self, marker_df=None, default_color="#DCDCDC", combined_color="#dc143c"):
         self.marker_map = {}
         self.color_map = {}
         self.default_color = default_color

@@ -7,8 +7,6 @@ from .ColorEncoder import  CellTypeMarkerEncoder
 from metacell.dataloader.scMetData import scMetData
 
 
-
-
 def annotate_cell_type_by_mz_marker(mdata: scMetData, cell_type_marker, result_path: str = None, offset: int = 1,
                                     sn_ratio: int = 5, interval: int = 6):
     """
@@ -54,7 +52,27 @@ def annotate_cell_type_by_mz_marker(mdata: scMetData, cell_type_marker, result_p
     mdata = annotate_cell_type_apex_index(mdata, offset=offset)
 
     # Encode and decode cell types
-    mdata.cell_type_marker_encoder = CellTypeMarkerEncoder(mdata.cell_type_marker_df)
+    # 提取 default_color
+    if "Unknown" in mdata.cell_type_color["cell_type"].values:
+        default_color = mdata.cell_type_color.loc[
+            mdata.cell_type_color["cell_type"] == "Unknown", "color_code"
+        ].values[0]
+    else:
+        default_color = "#DCDCDC"
+
+    # 提取 combined_color
+    if "Mixed" in mdata.cell_type_color["cell_type"].values:
+        combined_color = mdata.cell_type_color.loc[
+            mdata.cell_type_color["cell_type"] == "Mixed", "color_code"
+        ].values[0]
+    else:
+        combined_color = "#dc143c"
+
+    # 调用构造器
+    mdata.cell_type_marker_encoder = CellTypeMarkerEncoder(
+        mdata.cell_type_marker_df, default_color, combined_color
+    )
+
     mdata.scm_events['cell_type_encode'] = 0
     for marker_name in mdata.cell_type_marker_df['marker_name']:
         increment = mdata.cell_type_marker_encoder.encode(marker_name)
@@ -65,11 +83,17 @@ def annotate_cell_type_by_mz_marker(mdata: scMetData, cell_type_marker, result_p
     mdata.scm_events['cell_type'] = mdata.scm_events['cell_type'].apply(
         lambda x: ','.join(x) if len(x) > 1 else x[0] if x else '')
 
-    mdata.scm_events['cell_type_color'] = mdata.obs['cell_type_encode'].apply(
-        mdata.cell_type_marker_encoder.encode_to_color)
+    mdata.scm_events['cell_type_color'] = mdata.scm_events['cell_type_encode'].apply(mdata.cell_type_marker_encoder.encode_to_color)
 
-    mdata.scm_events['cell_type_name'] = mdata.obs['cell_type_encode'].apply(
+    mdata.scm_events['cell_type_name'] = mdata.scm_events['cell_type_encode'].apply(
         mdata.cell_type_marker_encoder.encode_to_name)
+
+    # 构建 marker_name 到 cell_type 的映射字典
+    marker_to_celltype = dict(zip(mdata.cell_type_marker_df['marker_name'],
+                                  mdata.cell_type_marker_df['cell_type']))
+
+    mdata.scm_events['cell_type_name'] = mdata.scm_events['cell_type_name'].map(marker_to_celltype).fillna(
+        mdata.scm_events['cell_type_name'])
 
     return mdata
 

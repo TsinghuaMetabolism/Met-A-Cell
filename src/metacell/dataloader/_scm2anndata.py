@@ -1,7 +1,7 @@
 import re
 import numpy as np
-import pandas as pd
 import anndata as ad
+import pandas as pd
 
 def scm2anndata(mdata):
     cell_feature_matrix = mdata.cell_feature_matrix
@@ -15,11 +15,20 @@ def scm2anndata(mdata):
     obs_meta = cell_feature_matrix.iloc[:,:col_index]
 
     var_meta = mdata.scm_events[['CellNumber', 'scan_Id', 'scan_start_time', 'TIC']]
-    var_meta['Feature_count'] = np.sum(~np.isnan(madata.X), axis=0)
+    if hasattr(mdata, "cell_marker") and isinstance(mdata.cell_marker, dict):
+        for key in mdata.cell_marker.keys():
+            if key == "TIC":
+                continue  # 跳过 TIC
+            candidate_cols = [f"{key}_mz", f"{key}_intensity"]
+            for col in candidate_cols:
+                if col in mdata.scm_events.columns and col not in var_meta.columns:
+                    var_meta[col] = list(mdata.scm_events[col])
+    var_meta['n_metabolites'] = np.sum(~np.isnan(madata.X), axis=0)
     var_meta = var_meta.set_index('CellNumber')
-    var_meta['TIC_baselines'] = list(mdata.cell_marker_eic['TIC']['baselines'].iloc[mdata.scm_events.index])
+    var_meta['TIC_baselines'] = list(mdata.cell_marker_eic['TIC']['baselines'].iloc[mdata.scm_events_index[mdata.main_cell_marker]])
+    var_meta['TIC_corrected'] = var_meta['TIC'] - var_meta['TIC_baselines']
 
-    if mdata.cell_type_marker_df is not None:
+    if isinstance(mdata.cell_type_marker_df, pd.DataFrame) and not mdata.cell_type_marker_df.empty:
         # 提取所需的列名
         marker_columns = [f"{marker}_mz" for marker in mdata.cell_type_marker_df['marker_name']] + \
                          [f"{marker}_intensity" for marker in mdata.cell_type_marker_df['marker_name']]
@@ -39,8 +48,10 @@ def scm2anndata(mdata):
     madata.obs = madata.obs.astype(str)
     madata.var = madata.var.astype(str)
     madata = madata.T
-
-    cols_to_convert = ['scan_start_time', 'TIC', 'TIC_baselines', 'cell_type_encode']
+    if isinstance(mdata.cell_type_marker_df, pd.DataFrame) and not mdata.cell_type_marker_df.empty:
+        cols_to_convert = ['scan_start_time', 'TIC', 'TIC_baselines', 'TIC_corrected', 'cell_type_encode']
+    else:
+        cols_to_convert = ['scan_start_time', 'TIC', 'TIC_baselines', 'TIC_corrected']
     for col in cols_to_convert:
         madata.obs[col] = pd.to_numeric(madata.obs[col], errors='coerce')  # 转换为数值，无法转换的设为 NaN
 

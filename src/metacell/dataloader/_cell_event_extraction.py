@@ -125,7 +125,7 @@ def extract_intensity(mdata: scMetData, name: str, mz: float) -> pd.DataFrame:
     # Fill missing intensity values with the median intensity
     #mz_intensity[f"{name}_intensity"].fillna(mz_intensity[f"{name}_intensity"].median(), inplace=True)
 
-    mdata.logger.info(f"Complete 2-step scanning to obtain the mz and intensity from marker {name} : {mz}.")
+    mdata.logger.info(f"Complete 2-step scanning to obtain the mz and intensity from marker {name} : {density_center}.")
     return mz_intensity
 
 
@@ -204,7 +204,7 @@ def merge_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: str,
     :return:
     """
     # Robustly integrate single-cell peak annotations from multiple strategies according to the offset
-    mdata.scm_events_index['merged'], scm_events_only_index = robust_scm_events_integration(mdata, cell_marker,
+    mdata.scm_events_index['merged'], mdata.scm_events_only_index = robust_scm_events_integration(mdata, cell_marker,
                                                                                             main_cell_marker, offset)
 
     if result_path is not None:
@@ -213,7 +213,7 @@ def merge_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: str,
 
         cell_marker_intensity = main_cell_marker if main_cell_marker == 'TIC' else f'{main_cell_marker}_intensity'
         _plt_merged_scm(mdata.raw_scm_data['scan_start_time'], mdata.raw_scm_data[cell_marker_intensity],
-                       mdata.scm_events_index['merged'], scm_events_only_index, figs_output_dir)
+                       mdata.scm_events_index['merged'], mdata.scm_events_only_index, figs_output_dir)
 
         mdata.logger.info(f'Complete visualization of merged SCM events: plt_merged_scm_event.pdf')
 
@@ -222,7 +222,7 @@ def merge_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: str,
     mdata.scm_events.loc[:, 'CellNumber'] = cellnumber
 
     mdata.logger.info(f'(1) The number of merged SCM events : {len(mdata.scm_events_index["merged"])}.')
-    for i, (key, value) in enumerate(scm_events_only_index.items()):
+    for i, (key, value) in enumerate(mdata.scm_events_only_index.items()):
         mdata.logger.info(f'({i + 2}) The number of SCM events only by {key} : {len(value)}.')
 
     return mdata
@@ -245,7 +245,7 @@ def robust_scm_events_integration(mdata: scMetData, cell_marker: dict, main_cell
             index2 = mdata.scm_events_index[marker]
             intersect1_e2, intersect2_e1, diff1_ex_intersect, diff2_ex_intersect = calculate_intersection(index1, index2, offset)
             intersection_result = np.intersect1d(intersection_result, intersect1_e2)
-
+            mdata.scm_events_index[f'merged_{marker}'] = intersect2_e1
             scm_events_only_index[marker] = diff2_ex_intersect
 
     scm_events_only_index[main_cell_marker] = np.setdiff1d(index1, intersection_result)
