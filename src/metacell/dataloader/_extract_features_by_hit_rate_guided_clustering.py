@@ -5,8 +5,7 @@ from .scMetData import scMetData
 from ._utils import extract_mz_intensity_from_scm_events, filter_intensity
 
 # 基于特征密度的聚类，利用特征密度作为聚类的核心标准。
-def extract_features_by_hit_rate_guided_clustering(mdata: scMetData, intensity_threshold: float, min_hits: int = 3,
-                                                   ppm_tolerance: int = 10):
+def extract_features_by_hit_rate_guided_clustering(mdata: scMetData, intensity_threshold: float = 500, min_hit_rate: float = 0.1, ppm_threshold: int = 10):
     """
     Hit Rate-Guided Clustering for Metabolic Feature Extraction, HRGC.
 
@@ -17,14 +16,15 @@ def extract_features_by_hit_rate_guided_clustering(mdata: scMetData, intensity_t
     -------
     mdata:
     intensity_threshold:
-    min_hits:
-    ppm_tolerance:
+    min_hit_rate:
+    ppm_threshold:
 
     Returns:
     -------
     cell_feature_matrix:
     """
     # Step 1: 筛选高强度的 m/z 数据
+    min_hits = round(len(mdata.scm_events) * min_hit_rate)
     data = extract_mz_intensity_from_scm_events(mdata)
 
     mdata.logger.info(f'Start metabolic features extraction by HRGC')
@@ -33,23 +33,24 @@ def extract_features_by_hit_rate_guided_clustering(mdata: scMetData, intensity_t
 
     # Step 2: 计算 hits
     mdata.logger.info(f'2) For each potential feature, calculate its hits and hit rate.')
-    data = calculate_hits(data, ppm_tolerance)
+    data = calculate_hits(data, ppm_threshold)
 
     # Step 3: 基于hits进行聚类。
     mdata.logger.info(f'3) Extract features by hit-rate guided clustering.')
-    cell_feature_matrix = cluster_by_hits(data, min_hits=min_hits, ppm_tolerance=10)
+    cell_feature_matrix = cluster_by_hits(data, min_hits=min_hits, ppm_threshold=10)
 
     mdata.cell_feature_matrix = cell_feature_matrix
 
+    mdata.processing_status['feature_extraction_strategy'] = 'hit rate-guided clustering'
     return mdata
 
 
-def calculate_hits(data: pd.DataFrame, ppm_tolerance: float) -> pd.DataFrame:
+def calculate_hits(data: pd.DataFrame, ppm_threshold: float) -> pd.DataFrame:
     """
     高效计算每个 m/z 的命中数(hits)。
     Args:
         data (pd.DataFrame): 输入数据框，包含 'mz', 'CellNumber' 列。
-        ppm_tolerance (float): 允许的 m/z 容差范围，单位 ppm。
+        ppm_threshold (float): 允许的 m/z 容差范围，单位 ppm。
     Returns:
         pd.DataFrame: 添加了 'hits', 'left_hits', 'right_hits' 列的数据框。
     """
@@ -70,8 +71,8 @@ def calculate_hits(data: pd.DataFrame, ppm_tolerance: float) -> pd.DataFrame:
     # 遍历每个 m/z
     for i in tqdm(range(n), desc="Calculating hits"):
         mz = mz_values[i]
-        left_bound = mz - mz * ppm_tolerance / 1e6
-        right_bound = mz + mz * ppm_tolerance / 1e6
+        left_bound = mz - mz * ppm_threshold / 1e6
+        right_bound = mz + mz * ppm_threshold / 1e6
 
         # 更新左边界索引
         left_index = i
@@ -98,7 +99,7 @@ def calculate_hits(data: pd.DataFrame, ppm_tolerance: float) -> pd.DataFrame:
 
 # Step 3: 基于密度和索引进行聚类。
 # 根据连续性，初步将聚类划分为不同类型的组别。
-def cluster_by_hits(data: pd.DataFrame, min_hits: int=3, ppm_tolerance: int=10):
+def cluster_by_hits(data: pd.DataFrame, min_hits: int=3, ppm_threshold: int=10):
     """
     主函数基于hits进行聚类。
 
@@ -123,13 +124,13 @@ def cluster_by_hits(data: pd.DataFrame, min_hits: int=3, ppm_tolerance: int=10):
         'Feature',
         'mz_center',
         'mz_mean',
+        'mz_std',
         'mz_median',
         'hits',
         'hit_rate',
     ]+unique_cells)
 
     cluster_id = 1
-
     max_hits = data['hits'].max()
 
     # 筛选低密度点并标记cluster=0
@@ -148,10 +149,10 @@ def cluster_by_hits(data: pd.DataFrame, min_hits: int=3, ppm_tolerance: int=10):
         merged_clusters=merge_adjacent_clusters(sub_clusters)
 
         # 对聚类进行预处理，包括计算聚类中心，并基于聚类中心重新划分聚类范围，最后检查并去除重复的 CellNumber，保留 mz 最近的行。
-        processed_clusters = process_clusters(data, merged_clusters, ppm_tolerance=ppm_tolerance)
+        processed_clusters = process_clusters(data, merged_clusters, ppm_threshold=ppm_threshold)
 
         # 更新 cell_feature_matrix，并在 data 中标记聚类状态，同时更新边缘密度。
-        cell_feature_matrix, data, cluster_id = update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cluster_id=cluster_id, total_cells=total_cells, ppm_tolerance=ppm_tolerance)
+        cell_feature_matrix, data, cluster_id = update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cluster_id=cluster_id, total_cells=total_cells, ppm_threshold=ppm_threshold)
 
     return cell_feature_matrix
 
@@ -209,7 +210,7 @@ def merge_adjacent_clusters(clusters):
     return merged_clusters
 
 # 整理出一个根据基于密度的聚类方法得到的m/z列表出来，包含有一些信息，例如hits。
-def process_clusters(data, merged_clusters, ppm_tolerance=10):
+def process_clusters(data, merged_clusters, ppm_threshold=10):
     """
     对每个聚类执行以下操作：
     1. 计算聚类中心 (mz 中位数)。
@@ -220,7 +221,7 @@ def process_clusters(data, merged_clusters, ppm_tolerance=10):
     -------
     data:
     merged_clusters: 列表，每个元素是一个DataFrame，表示一个聚类
-    ppm_tolerance: mz的允许波动范围(ppm)
+    ppm_threshold: mz的允许波动范围(ppm)
 
     Returns:
     --------
@@ -233,8 +234,8 @@ def process_clusters(data, merged_clusters, ppm_tolerance=10):
         mz_center = cluster['mz'].median()
 
         # 2. 根据 10 ppm 范围重新划分聚类范围
-        mz_min = mz_center * (1 - ppm_tolerance / 1e6)
-        mz_max = mz_center * (1 + ppm_tolerance / 1e6)
+        mz_min = mz_center * (1 - ppm_threshold / 1e6)
+        mz_max = mz_center * (1 + ppm_threshold / 1e6)
         filtered_data = data[(data['mz'] >= mz_min) & (data['mz'] <= mz_max)]
 
         # 3. 检查并去除重复的 CellNumber
@@ -252,7 +253,7 @@ def process_clusters(data, merged_clusters, ppm_tolerance=10):
     return processed_clusters
 
 
-def calculate_hits_for_indices(data, indices, ppm_tolerance):
+def calculate_hits_for_indices(data, indices, ppm_threshold):
     # 提取未聚类的数据
     valid_data = data[data['cluster'] == -1]
 
@@ -278,8 +279,8 @@ def calculate_hits_for_indices(data, indices, ppm_tolerance):
         mz = mz_values[i]
 
         # 计算左边界和右边界
-        left_bound = mz - mz * ppm_tolerance / 1e6
-        right_bound = mz + mz * ppm_tolerance / 1e6
+        left_bound = mz - mz * ppm_threshold / 1e6
+        right_bound = mz + mz * ppm_threshold / 1e6
 
         # 初始化左右边界索引
         left_index = i
@@ -347,7 +348,7 @@ def find_affected_indices(affected_indices, data, min_index, max_index):
     return affected_indices
 
 
-def update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cluster_id, total_cells, ppm_tolerance):
+def update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cluster_id, total_cells, ppm_threshold):
     """
     更新 cell_feature_matrix，并在 data 中标记聚类状态，同时更新边缘密度。
     """
@@ -361,6 +362,7 @@ def update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cl
         cellnumber = len(cluster)
         cellratio = cellnumber / total_cells * 100
         mz_mean = cluster['mz'].mean()
+        mz_std = cluster['mz'].std()
         mz_median = cluster['mz'].median()
 
         # 构造单条特征信息
@@ -368,6 +370,7 @@ def update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cl
             'Feature': cluster_id,
             'mz_center': mz_center,
             'mz_mean': mz_mean,
+            'mz_std':mz_std,
             'mz_median': mz_median,
             'hits': cellnumber,
             'hit_rate': cellratio,
@@ -394,6 +397,6 @@ def update_cell_feature_matrix(processed_clusters, cell_feature_matrix, data, cl
     unique_indices = set(affected_indices)
     filtered_indices = [idx for idx in unique_indices if data.loc[idx,'cluster'] == -1]
 
-    data = calculate_hits_for_indices(data, filtered_indices, ppm_tolerance)
+    data = calculate_hits_for_indices(data, filtered_indices, ppm_threshold)
     return cell_feature_matrix, data, cluster_id
 

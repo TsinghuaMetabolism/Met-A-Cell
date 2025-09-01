@@ -5,7 +5,7 @@ from scipy.stats import gaussian_kde
 from scipy.linalg import LinAlgError
 from typing import Union, Literal, Tuple, Any
 from .scMetData import scMetData
-from ._plotting import plt_baseline_correction
+from ._plotting import plt_baseline, plt_baseline_corrected
 
 def get_index(lst: list = None, item: str = ''):
     """
@@ -36,7 +36,7 @@ def identify_intensity_threshold(intensity_data):
 def double_scan_feature_integration(mz_data: list,
                                     intensity_data: list,
                                     mz: float,
-                                    ppm: int=10,
+                                    ppm: float=10,
                                     mode: Literal["sum", "max", "nearest"]="nearest",) -> Tuple[Any, pd.DataFrame]:
     """
     2-step scanning to extract the mz and its corresponding intensity:
@@ -164,6 +164,29 @@ def mz_threshold(mz: float,
         ppm = methods * 0.000001
         return mz - mz * ppm, mz + mz * ppm
 
+def calculate_intersection(index1, index2, offset):
+    """
+    Calculate the intersection of two index sets with a given offset.
+
+    :param index1: The first index set.
+    :param index2: The second index set.
+    :param offset: The offset value.
+    """
+    expanded_index1 = np.unique(np.concatenate(
+        [index1 - offset, index1, index1 + offset]
+    ))
+    expanded_index2 = np.unique(np.concatenate(
+        [index2 - offset, index2, index2 + offset]
+    ))
+
+    intersect1_e2 = np.intersect1d(index1, expanded_index2)
+    intersect2_e1 = np.intersect1d(index2, expanded_index1)
+
+    diff1_ex_intersect = np.setdiff1d(index1, intersect1_e2)
+    diff2_ex_intersect = np.setdiff1d(index2, intersect2_e1)
+
+    return intersect1_e2, intersect2_e1, diff1_ex_intersect, diff2_ex_intersect
+
 
 #  === use kernel density estimation (KDE) to calculate the density. ===
 def identify_density_center_byKDE(mz_list: np.array,
@@ -221,25 +244,23 @@ def sliding_window_baseline_correction(data: pd.Series,
 
     # get baselines
     baselines = get_baselines(segments, p=p, max_iter=100)
-
+    # get total baselines
     # flatten the list of baselines
     total_baselines = [baseline for segment_baselines in baselines for baseline in segment_baselines]
-
+    #
     df = pd.DataFrame({'baselines': total_baselines, 'data': data, 'time': times})
 
     # 1. If baselines are NaN or baselines are greater than or equal to data, then signal equals 0.
     # 2. Otherwise, signal = data - baselines.
     df['signal'] = np.where((df['baselines'].isna()) | (df['baselines'] >= df['data']), 0, df['data'] - df['baselines'])
 
-    # Calculate the threshold based on the baseline mean and standard deviation.
-    mph = calculate_baselines_threshold(df['signal'], multiplier=sn_ratio)
-
     # Select the index of data points greater than the minimum peak value.
     # ind = np.array(df[df['signal'] > mph].index)
 
-    # plt_baseline_correction outputs a plot showing the data before and after baseline correction.
+    # plt_baseline and plt_baseline_corrected outputs plots showing the data before and after baseline correction.
     if output2figures is not None:
-        plt_baseline_correction(df['time'], df['data'], df['baselines'], df['signal'], mph, output2figures)
+        plt_baseline(df, output_dir=output2figures)
+        plt_baseline_corrected(df, sn_ratio, output_dir=output2figures)
 
     return df
 
@@ -308,34 +329,56 @@ def get_baselines(segments: list,
     return baselines
 
 # === Calculate the threshold based on the baseline mean and standard deviation. ===
-def calculate_baselines_threshold(baseline, multiplier=5) -> float:
+def calculate_signal_threshold_from_signal(signal_profile, multiplier=5):
     """
-    Description:
-    -----------
-    Calculate the threshold based on the baseline mean and standard deviation.
+    Calculate signal threshold based on baseline-corrected signal intensity.
+
 
     Parameters:
     -----------
-    - baseline(array)
-    - multiplier(int or float)
+    signal : array-like
+        Baseline-corrected signal intensity.
+    multiplier : float
+        Multiplier for standard deviation (e.g., S/N ratio).
+
 
     Returns:
     --------
-    threshold
+    threshold : float
+        Threshold calculated as mean + multiplier * std, excluding outliers.
     """
-    # Calculate Q1 (5th percentile) and Q3 (95th percentile)
-    Q1 = np.percentile(baseline, 5)
-    Q3 = np.percentile(baseline, 95)
-    # Remove outliers: keep only data points between Q1 and Q3
-    filtered_baseline = baseline[(baseline >= Q1) & (baseline <= Q3)]
-    # Calculate the mean and standard deviation of the filtered baseline
-    mean_baseline = np.mean(filtered_baseline)
-    std_baseline = np.std(filtered_baseline)
+    signal = signal_profile['signal']
+    Q1 = np.percentile(signal, 5)
+    Q3 = np.percentile(signal, 95)
+    filtered = signal[(signal >= Q1) & (signal <= Q3)]
+    mean = np.mean(filtered)
+    std = np.std(filtered)
+    return mean + multiplier * std
 
-    # Calculate the threshold
-    threshold = mean_baseline + multiplier * std_baseline
+def calculate_signal_threshold_from_raw_data(signal_profile, multiplier=5):
+    """
+    Calculate threshold from raw data and subtract the baseline to project to signal space.
+    Handles NaN values by ignoring them in percentile/std calculations, and
+    treating NaN in baselines as zero when subtracting.
+    """
+    data = signal_profile['data'].dropna()
+    baselines = signal_profile['baselines'].fillna(0)  # Treat NaN baseline as zero
 
-    return threshold
+
+    Q1 = np.percentile(data, 5)
+    Q3 = np.percentile(data, 95)
+    filtered_data = data[(data >= Q1) & (data <= Q3)]
+    mean_data = np.mean(filtered_data)
+    std_data = np.std(filtered_data)
+    raw_threshold = mean_data + multiplier * std_data
+
+
+    # Subtract baseline; fill NaN baseline as 0 to avoid NaN in result
+    threshold_diff = raw_threshold - baselines.to_numpy()
+
+
+    return threshold_diff
+
 
 
 # === Detect peaks in data based on their amplitude and other features. ===
@@ -476,4 +519,6 @@ def filter_intensity(data: pd.DataFrame, intensity_threshold: float) -> pd.DataF
     Returns:
         pd.DataFrame: 筛选后的数据。
     """
-    return data[data['intensity'] >= intensity_threshold].copy()
+    data = data[data['intensity'] >= intensity_threshold].copy()
+    data = data.sort_values(by='mz', ascending=True).reset_index(drop=True)
+    return data

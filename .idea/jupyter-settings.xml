@@ -7,7 +7,6 @@
           <value>
             <JupyterConnectionParameters>
               <option name="managed" value="true" />
-              <option name="sdkHomePath" value="$USER_HOME$/opt/anaconda3/envs/pytorch3/bin/python" />
             </JupyterConnectionParameters>
           </value>
         </entry>
@@ -15,7 +14,6 @@
           <value>
             <JupyterConnectionParameters>
               <option name="managed" value="true" />
-              <option name="port" value="8888" />
             </JupyterConnectionParameters>
           </value>
         </entry>

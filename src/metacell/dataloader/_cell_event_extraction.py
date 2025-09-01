@@ -4,8 +4,8 @@ import pandas as pd
 
 from metacell.dataloader.scMetData import scMetData
 from ._utils import double_scan_feature_integration, sliding_window_baseline_correction, detect_peaks
-from ._utils import calculate_baselines_threshold
-from ._plotting import plt_scm_events,plt_merged_scm
+from ._utils import calculate_signal_threshold_from_signal
+from ._plotting import _plt_scm_events, _plt_merged_scm
 
 
 def extract_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: str = None, result_path: str = None,
@@ -36,6 +36,7 @@ def extract_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: st
         if len(cell_marker) == 1:
             # Set main_cell_marker to that key
             main_cell_marker = list(cell_marker.keys())[0]
+            mdata.scm_type = main_cell_marker
         else:
             # If cell_marker has multiple keys
             if main_cell_marker not in cell_marker.keys():
@@ -52,6 +53,9 @@ def extract_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: st
                         f"main_cell_marker '{main_cell_marker}' is not in cell_marker, "
                         f"and 'TIC' is also not present in cell_marker. Please provide a valid main_cell_marker."
                     )
+            mdata.scm_type = 'merged'
+    mdata.cell_marker = cell_marker
+    mdata.main_cell_marker = main_cell_marker
     # Filter data according to the given time range, setting the corresponding intensity values to NaN.
     if poor_signal_range is not None:
         mdata.raw_scm_data = discard_time_period(mdata.raw_scm_data, time_period=poor_signal_range)
@@ -78,7 +82,13 @@ def extract_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: st
 
         mdata.logger.info(f"Finish extracting SCM events by {marker}.")
 
-    #
+    if 'TIC' not in cell_marker.keys():
+        marker = 'TIC'
+        mdata.cell_marker_eic[marker], _ = extract_peak(mdata, marker=marker,
+                                                        figs_output_dir=None,
+                                                        sn_ratio=sn_ratio,
+                                                        interval=interval)
+
     if len(cell_marker) == 1:
         mdata.scm_events = mdata.raw_scm_data.iloc[mdata.scm_events_index[main_cell_marker]]
         cellnumber = ['Cell{:05d}'.format(i + 1) for i in range(len(mdata.scm_events))]
@@ -88,6 +98,14 @@ def extract_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: st
         mdata.logger.info(f'Start the integration of the results of multiple strategies')
         mdata = merge_scm_events(mdata, cell_marker, main_cell_marker, result_path, offset)
         mdata.logger.info(f'Complete the integration of the results of multiple strategies')
+
+    # 解析cell_marker字典，确定提取策略。
+    if len(cell_marker) == 1:
+        strategy = list(cell_marker.keys())[0]
+    else:
+        keys = [main_cell_marker] + [k for k in cell_marker.keys() if k != main_cell_marker]
+        strategy = ', '.join(keys)
+    mdata.processing_status['scm_events_extraction_strategy'] = strategy
 
     return mdata
 
@@ -135,15 +153,16 @@ def extract_peak(mdata: scMetData,
                                                         mdata.raw_scm_data['scan_start_time'], sn_ratio,
                                                         figs_output_dir,
                                                         window_size=100, p=0.5)
-    mph = calculate_baselines_threshold(df['signal'], multiplier=sn_ratio)
+    mph = calculate_signal_threshold_from_signal(df, multiplier=sn_ratio)
 
     # Use detect_peaks to find all peak points in the data and obtain their indices.
     peaks = detect_peaks(df['signal'], mpd=interval, mph=mph)
 
     if figs_output_dir is not None:
         mdata.logger.info(f'Complete visualization of {marker}-annotated single-cell events: plt_baselines.pdf and plt_baselines_correction.pdf')
-        plt_scm_events(mdata.raw_scm_data['scan_start_time'], mdata.raw_scm_data[marker_intensity],
+        _plt_scm_events(mdata.raw_scm_data['scan_start_time'], mdata.raw_scm_data[marker_intensity],
                        peaks, figs_output_dir)
+
         mdata.logger.info(f'Complete visualization of {marker}-annotated single-cell events: plt_scm_event.pdf.')
 
     return df, peaks
@@ -193,7 +212,7 @@ def merge_scm_events(mdata: scMetData, cell_marker: dict, main_cell_marker: str,
         os.makedirs(figs_output_dir, exist_ok=True)
 
         cell_marker_intensity = main_cell_marker if main_cell_marker == 'TIC' else f'{main_cell_marker}_intensity'
-        plt_merged_scm(mdata.raw_scm_data['scan_start_time'], mdata.raw_scm_data[cell_marker_intensity],
+        _plt_merged_scm(mdata.raw_scm_data['scan_start_time'], mdata.raw_scm_data[cell_marker_intensity],
                        mdata.scm_events_index['merged'], scm_events_only_index, figs_output_dir)
 
         mdata.logger.info(f'Complete visualization of merged SCM events: plt_merged_scm_event.pdf')

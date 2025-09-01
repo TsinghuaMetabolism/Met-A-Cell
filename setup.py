@@ -27,6 +27,9 @@ setup(
     ],
     package_dir={"":"src"},
     packages=find_packages(where="src"),
+    package_data={
+        "metacell": ["resource/*.csv", "resource/*.json", "resource/*.xlsx"],
+    },
     python_requires=">=3.9",
     # 依赖项列表
     install_requires=[

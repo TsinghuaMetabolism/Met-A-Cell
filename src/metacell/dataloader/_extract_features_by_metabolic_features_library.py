@@ -19,6 +19,7 @@ def extract_features_by_metabolic_feature_library(mdata: scMetData, metab_anno: 
 
     mdata.cell_feature_matrix = cell_feature_matrix
 
+    mdata.processing_status['feature_extraction_strategy'] = 'metabolic feature library'
     return mdata
 
 
@@ -84,14 +85,18 @@ def construct_cell_feature_matrix(cluster_result: pd.DataFrame):
     cell_feature_matrix = cell_feature_matrix.sort_index(axis=1)
 
     cluster_info = pd.DataFrame()
-    for idx in cell_feature_matrix.index:
+    for idx in tqdm(cell_feature_matrix.index, total=len(cell_feature_matrix.index), desc="Add cluster information to cell feature matrix."):
         cluster = cluster_result[cluster_result['Feature'] == idx]
         mz_mean = cluster['mz'].mean()
         mz_median = cluster['mz'].median()
         cellnumber = len(cluster['CellNumber'].unique())
         cellratio = cellnumber / total_cells * 100
-        info = {'Feature': idx, 'mz_center': cluster['ref_mz'].iloc[0], 'mz_mean': mz_mean,
-                'mz_median': mz_median, 'metabolite': cluster['metabolite'].iloc[0], 'hits': cellnumber, 'hit_rate': cellratio}
+        if 'metabolite' in cluster:
+            info = {'Feature': idx, 'mz_center': cluster['ref_mz'].iloc[0], 'mz_mean': mz_mean,
+                    'mz_median': mz_median, 'metabolite': cluster['metabolite'].iloc[0], 'hits': cellnumber, 'hit_rate': cellratio}
+        else:
+            info = {'Feature': idx, 'mz_center': cluster['ref_mz'].iloc[0], 'mz_mean': mz_mean,
+                    'mz_median': mz_median, 'hits': cellnumber,'hit_rate': cellratio}
 
         cluster_info = pd.concat([cluster_info, pd.DataFrame([info])], ignore_index=True)
 
