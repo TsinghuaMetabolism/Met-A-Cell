@@ -1,0 +1,13 @@
+{
+  "metab_anno": "../Resource/metabolite_annotation_list.xlsx",
+  "cell_type_marker_library": "../Resource/cell_type_marker_library.xlsx",
+  "cell_type_color": "../Resource/cell_type_color.xlsx",
+  "offset": 1,
+  "interval": 6,
+  "sn_ratio": 10,
+  "min_hit_rate": 0.2,
+  "ppm_tolerance": 10,
+  "intensity_threshold": 200,
+  "main_cell_marker": "PC34_1",
+  "cell_marker": {"PC34_1": 760.5803}
+}
